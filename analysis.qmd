@@ -1,0 +1,1234 @@
+---
+title: Balance Between Daily Solitude and Socializing May Reflect Time or Motivation for Being Alone
+subtitle: Analysis supplement
+author: 
+  - name: Netta Weinstein
+    affiliation: 
+      name: University of Reading
+  - name: Mark Adams
+    affiliation:
+      name: University of Reading
+  - name: Thuy-vy Nguyen
+    affiliation:
+      name: Durham University
+  - name: Matti Vuorre
+    orcid: 0000-0001-5052-066X
+    email: m.j.vuorre@tilburguniversity.edu
+    url: https://vuorre.netlify.app
+    affiliation:
+      name: Tilburg University
+date: "2023-01-11"
+format: 
+  html:
+    embed-resources: true
+    reference-location: margin
+    toc: true
+    toc-location: left
+  pdf:
+    documentclass: scrartcl
+    number-sections: true
+    number-depth: 2
+    colorlinks: true
+    papersize: a4
+    toc: true
+callout-appearance: simple
+bibliography: references.bib
+execute:
+  include: true
+  echo: false
+  message: false
+  warning: false
+  cache: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+#| cache: false
+
+library(haven)
+library(tidybayes)
+library(scales)
+library(polypoly)
+library(lme4)
+library(janitor)
+library(performance)
+library(gt)
+library(gtExtras)
+library(patchwork)
+library(papaja)
+library(brms)
+library(kableExtra)
+library(ggthemes)
+library(emmeans)
+library(ggstance)
+library(cmdstanr)
+library(memoise)
+library(cachem)
+library(parameters)
+library(tidyverse)
+
+# Plots
+theme_set(
+  theme_few(base_size = 9) +
+    theme(
+      strip.text = element_text(size = rel(0.9)),
+      axis.ticks = element_line(linewidth = .3), 
+      plot.tag.position = c(0, 1)
+    )
+)
+
+# Tables
+k2 <- function(x, s = 12, escape = TRUE) {
+  x %>% 
+    kbl(digits = 2, booktabs = TRUE, escape = escape) %>% 
+    kable_classic_2("striped", html_font = "Arial", font_size = s)
+}
+options(knitr.kable.NA = '')
+knitr::opts_chunk$set(dpi = 300)
+
+# Cache
+dir.create("tmp", FALSE)
+cd <- cache_disk("tmp")
+
+.lmer <- memoise(lmer, cache = cd)
+```
+
+# Data
+
+```{r}
+dir.create("data", FALSE)
+if (!file.exists("data/evening.sav")) {
+  download.file(
+    "https://osf.io/download/63fe6623bbc5e50890f80153/", 
+    destfile = "data/evening.sav"
+  )
+  download.file(
+    "https://osf.io/download/63fe661fbbc5e5088ff80153/",
+    destfile = "data/baseline.sav"
+  )
+}
+
+dat <- read_sav(
+  "data/evening.sav", 
+  col_select = c(
+    ID, DAY, DaySatisfaction, Lonely, 
+    Alonely, Stress, LTime, QTime, 
+    choiceful, Aut_NS_tot
+  )
+)
+dat <- dat %>%   
+  rename(
+    Satisfaction = DaySatisfaction,
+    Choice = choiceful,
+    Autonomy = Aut_NS_tot
+  ) %>% 
+  mutate(
+    across(
+      c(Satisfaction, Lonely, Alonely, Stress, Choice, Autonomy),
+      as.numeric
+    )
+  ) %>% 
+  arrange(ID, DAY) %>% 
+  group_by(ID) %>% 
+  mutate(
+    across(
+      c(Satisfaction, Lonely, Alonely, Stress, Choice, Autonomy), 
+      list("AR" = ~lag(., 1))
+    )
+  ) %>% 
+  ungroup()
+
+dat2 <- read_sav(
+  "data/baseline.sav", 
+  col_select = c(ID, sdMot, B_age, B_gender)
+) %>% 
+  rename_with(~str_remove(., "B_")) %>% 
+  as_factor() %>% 
+  mutate(age = as.numeric(as.character(age)))
+
+# GMC sdmot
+dat2$sdMot <- dat2$sdMot - mean(dat2$sdMot, na.rm = TRUE)
+
+dat <- left_join(dat, dat2)
+```
+
+```{r}
+dat %>% 
+  select(Satisfaction:LTime) %>% 
+  gt_plt_summary(title = "Summary of main variables")
+```
+
+## Demographics and summary
+
+```{r}
+dat2 %>% 
+  tabyl(gender) %>% 
+  adorn_pct_formatting() %>% 
+  k2() %>% 
+  pack_rows("Test", 1, 6)
+age_mean <- number(mean(dat2$age, na.rm = TRUE), .1)
+age_iqr <- quantile(dat2$age, c(.25, .75), na.rm = TRUE)
+n_subjects <- length(unique(dat2$ID))
+days <- count(dat, ID) %>% 
+  pull(n) %>% 
+  quantile()
+```
+
+Final sample size was `r n_subjects` participants (mean age: `r age_mean`, iqr: `r age_iqr`). Median number of days participated: `r days[3]`, iqr: `r days[2]` - `r days[4]`.
+
+## Missing-at-random analyses
+
+>Missing at Random (MAR) will be evaluated with a simple regression model predicting each one of our variables from the number of days the study was completed (ranging from 1-21 days). 
+
+We first draw a scatterplot of the outcomes, and proportional time in solitude, on the day of study (@fig-mar).
+
+```{r}
+#| label: fig-mar
+#| fig-height: 4
+#| fig-cap: Scatterplots of each outcome on day of measurement. Points are individual measurements (vertically jittered for visibility), and blue lines indicate exploratory LOESS lines.
+dat %>% 
+  pivot_longer(Satisfaction:LTime) %>% 
+  ggplot(aes(DAY, value)) +
+  scale_y_continuous(
+    "Response",
+    breaks = extended_breaks()
+  ) +
+  scale_x_continuous(
+    "Day",
+    breaks = extended_breaks()
+  ) +
+  stat_smooth(
+    method = "loess", 
+    se = FALSE
+    ) +
+  geom_point(
+    shape = 1, alpha = .2, size = .75,
+    position = position_jitter(height = .3, seed = 101)
+  ) +
+  facet_wrap("name", nrow = 2, scales = "free_y")
+```
+
+
+We then regress each outcome $Y_{ij}$ on day $i$ and person $j$ on a constant and coefficient of day (0-20), with complete random effects over participants.
+
+\begin{align*}
+\text{Y}_{ij} &\sim \text{Normal}(\mu_{ij}, \sigma^2_y), \\
+\mu_{ij} &= \gamma_0 + \beta_{0j} + (\gamma_1 + \beta_{1j})\text{Day}_{ij}, \\
+\pmb{\beta}_j &\sim \text{Normal}(\pmb{0}, \Sigma).
+\end{align*}
+
+For example for day satisfaction, we specify an `lmer()` model with by-person random effects:
+
+```{r}
+#| echo: true
+#| eval: false
+lmer(
+  Satisfaction ~ 1 + DAY + (1 + DAY | ID),
+  # Make days run from 0 to 20 so intercept is at day 1
+  data = mutate(dat, DAY = DAY - 1)
+)
+```
+
+The parameter estimates are shown in @tbl-mar. Both satisfaction and autonomy need satisfaction decreased slightly throughout the study.
+
+```{r}
+#| include: true
+#| fig-pos: "H"
+#| label: tbl-mar
+#| tbl-cap: Parameter estimates from models examining the missing at random assumption (whether outcomes change as a function of time)
+
+fit_mar <- function(y) {
+  out <- .lmer(
+    str_glue("{y} ~ 1 + DAY + (1 + DAY | ID)"),
+    data = mutate(dat, DAY = DAY - 1)
+  )
+  out
+}
+tibble(
+  y = c("Satisfaction", "Lonely", "Alonely", "Stress", "Autonomy")
+) %>% 
+  mutate(fit_mar = map(y, fit_mar)) %>% 
+  mutate(out = map(fit_mar, parameters)) %>% 
+  select(-fit_mar) %>% 
+  unnest(out) %>% 
+  filter(Parameter == "DAY") %>% 
+  mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = str_glue(
+      "{Coefficient}, SE = {SE}, [{CI_low}, {CI_high}], p {print_p(p, add_equals = TRUE)}"
+    ),
+  ) %>% 
+  select(Outcome = y, Parameter, Estimate) %>% 
+  k2() %>% 
+  footnote(
+    "Numbers indicate coefficient values, standard errors, and 95% CIs", 
+    footnote_as_chunk = TRUE
+    )
+```
+
+## Unconditional models
+
+>Following guidelines for conducting mixed model analyses of diary study data, we will first establish a series of unconditional models to provide estimates of the fundamental descriptive statistics (mean, within-person variance, and between-person variance) in the proportional time spent alone and well-being outcomes.
+
+To examine this, we estimate the same model as above for each variable, but do not include a coefficient for time. For example, for day satisfaction, this model is
+
+```{r}
+#| echo: true
+#| eval: false
+lmer(
+  Satisfaction ~ 1 + (1 | ID),
+  data = dat
+)
+```
+
+The parameter estimates are shown in @tbl-unconditional
+
+```{r}
+#| include: true
+#| label: tbl-unconditional
+#| tbl-cap: Results of unconditional models estimating overall means (Intercept), and their standard deviations over people (Persons) and observations (Observations).
+#| fig-pos: "H"
+fit_u <- function(y) {
+  out <- .lmer(
+    str_glue("{y} ~ 1 + (1 | ID)"),
+    data = dat
+  )
+  out
+}
+
+tidy_u <- function(fit) {
+  x <- icc(fit, ci = TRUE)
+  bind_rows(
+    tibble(parameters(fit)),
+    tibble(Parameter = "ICC", Coefficient = x[1,1], CI_low = x[2,1], CI_high = x[3,1])
+  )
+}
+tidy_u <- memoise(tidy_u, cache = cd)
+
+fits_u <- tibble(
+  y = c("Satisfaction", "Lonely", "Alonely", "Stress", "Autonomy", "LTime")
+) %>% 
+  mutate(out = map(y, ~fit_u(.x) %>% tidy_u())) %>% 
+  unnest(out)
+
+fits_u %>%   
+  mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = if_else(
+      str_starts(Parameter, "SD"),
+      Coefficient,
+      str_glue(
+        "{Coefficient}, [{CI_low}, {CI_high}]"
+      ) %>% as.character
+    ),
+  ) %>% 
+  select(Outcome = y, Parameter, Estimate) %>% 
+  mutate(Parameter = str_replace_all(Parameter, "SD \\(Intercept\\)", "SD (Persons)")) %>% 
+  k2()
+```
+
+
+## Centering
+
+>For all models, we will follow guidelines, and group mean center all measures.
+
+We've processed the data as follows:
+
+1. Grand-mean-center linear proportional solitude time, daily choiceful motivation, and autocorrelation terms
+  - Leads to between-person components that are centered on the "average person"
+2. Calculate person means for the above (between-person component)
+3. Calculate within-person deviations from person means (within-person component)
+3. Square the between- and within-person linear time components to create quadratic time terms
+
+```{r}
+# Person mean centering
+dat <- dat %>% 
+  mutate(
+    across(
+      c(Choice, LTime, ends_with("_AR")),
+      ~. - mean(., na.rm = TRUE))
+  ) %>%
+  group_by(ID) %>% 
+  mutate(
+    across(
+      c(Choice, LTime, ends_with("_AR")), 
+      list(b = ~mean(., na.rm = TRUE))
+    ),
+    across(
+      c(Choice, LTime, ends_with("_AR")), 
+      list(c = ~. - mean(., na.rm = TRUE))
+    )
+  ) %>% 
+  mutate(QTime_c = LTime_c^2, QTime_b = LTime_b^2) %>% 
+  ungroup()
+```
+
+
+```{r}
+#| label: fig-centering
+#| include: true
+#| fig-height: 2.2
+#| fig-cap: Example of person-mean centering linear and quadratic time. A. Raw LTime and QTime values. B. Person-mean deviated LTime and QTime for all individuals (lines). C. All individuals' person-mean LTime and QTime.
+
+p1 <- dat %>% 
+  ggplot(aes(LTime, QTime)) +
+  geom_line()
+p2 <- dat %>% 
+  ggplot(aes(LTime_c, QTime_c)) +
+  geom_line(aes(group = ID), linewidth = .2, alpha = .3)
+p3 <- dat %>% 
+  distinct(ID, LTime_b, QTime_b) %>% 
+  ggplot(aes(LTime_b, QTime_b)) +
+  geom_line(aes(y = LTime_b^2), col = "red", linewidth = 2) +
+  geom_line() 
+
+(p1 | p2 | p3) +
+  plot_annotation(tag_level = "A")
+```
+
+# RQ 1 & 2: Tipping points in well-being on time
+
+>Is there an average inflection or tipping point (i.e., maxima or minima) wherein the relationship between the proportional time spent in solitude and well-being outcomes shifts?
+
+We first draw some scatterplots of the relations between each outcome and time (@fig-Figure-1).
+
+```{r}
+#| label: fig-Figure-1
+#| include: true
+#| cache: false
+#| column: body-outset-right
+#| fig-height: 6
+#| fig-width: 8
+#| fig-cap: Scatterplots of each well-being outcome on within-person centered proportion of solitary time. A. Scatterplots a random sample of participants. Lines indicate exploratory LOESS lines. B. Scatterplots for all data.
+
+set.seed(11)
+p_data_individuals <- dat %>% 
+  filter(ID %in% sample(unique(dat$ID), 5)) %>% 
+  mutate(ID = fct_anon(factor(ID), prefix = "Person ")) %>% 
+  pivot_longer(c(Satisfaction, Lonely, Alonely, Stress, Autonomy)) %>% 
+  ggplot(aes(LTime_c, value)) +
+  scale_y_continuous(
+    "Well-being",
+    breaks = extended_breaks()
+  ) +
+  scale_x_continuous(
+    "Within-person centered time",
+    breaks = extended_breaks()
+  ) +
+  coord_cartesian(ylim = c(0, 6.33)) +
+  geom_point(size = 1, shape = 1) +
+  geom_line(
+    stat = "smooth", method = "loess",
+    linewidth = 1.25, col = "white", alpha = .5, span = 1
+  ) +
+  geom_line(
+    stat = "smooth", method = "loess",
+    linewidth = .5, col = "black", span = 1
+  ) +
+  facet_grid(
+    ID~name
+  ) +
+  theme(
+    axis.title.x = element_blank()
+  )
+p_data_all <- dat %>% 
+  mutate(Y = "All data") %>% 
+  pivot_longer(c(Satisfaction, Lonely, Alonely, Stress, Autonomy)) %>% 
+  ggplot(aes(LTime_c, value)) +
+  scale_y_continuous(
+    "Well-being",
+    breaks = extended_breaks()
+  ) +
+  scale_x_continuous(
+    "Within-person centered proportional time spent in solitude",
+    breaks = extended_breaks()
+  ) +
+  geom_point(
+    size = 1, alpha = .2, shape = 1,
+    position = position_jitter(height = .1)
+  ) +
+  geom_line(
+    stat = "smooth", method = "loess",
+    linewidth = 1.25, col = "white", alpha = .5, span = 1
+  ) +
+  geom_line(
+    stat = "smooth", method = "loess",
+    linewidth = .5, col = "black", span = 1
+  ) +
+  facet_grid(Y~name)
+(p_data_individuals / p_data_all) +
+  plot_layout(heights = c(800, 200)) +
+  plot_annotation(tag_levels = "A")
+```
+
+## Method
+
+To answer, we estimate, separately for each outcome, a model where the outcome values *Y* for day *i* and person *j* are normally distributed
+
+$$
+\text{Y}_{ij} \sim \text{Normal}(\mu_{ij}, \sigma^2_y),
+$$ 
+
+and model the mean of the distribution on a constant $\gamma_{00}$, the person-mean time terms $\gamma_{01}$ and $\gamma_{02}$, a coefficient for the person-mean centered lagged outcome $\gamma_{10}$ and coefficients for the person-mean centered linear ($\gamma_{20}$) and quadratic time ($\gamma_{30}$),
+
+$$
+\begin{align}
+\mu_{ij} = &\gamma_{00} + \beta_{0j} + 
+  \gamma_{01}\overline{\text{LTime}}_j + 
+  \gamma_{02}\overline{\text{QTime}}_j + \\
+  &(\gamma_{10} + \beta_{1j})\text{Y}_{[i-1]j} + \\
+  &(\gamma_{20} + \beta_{2j})\text{LTime}_{ij} + \\
+  &(\gamma_{30} + \beta_{3j})\text{QTime}_{ij}.
+\end{align}
+$$
+
+Importantly, because the data is observed over time for multiple participants, we estimate person-specific parameters in addition to the average parameters. The average coefficients ($\pmb{\gamma}$) represent means of the prior distributions of the participant-level coefficients, denoted above with $\beta$s and subscripts *j*. These are modelled as multivariate normal distributed with means zero and a variance-covariance matrix $\Sigma$
+
+$$
+\pmb{\beta}_j \sim \text{Normal}(\pmb{0}, \Sigma)
+$$
+
+We estimate this model in R with the `lmer()` function from the lme4 package [@batesFittingLinearMixedEffects2015; @batesLme4LinearMixedEffects2022; @rcoreteamLanguageEnvironmentStatistical2022]. For example, for day satisfaction, we write
+
+```{r}
+#| echo: true
+#| eval: false
+lmer(
+  Satisfaction ~ 1 + LTime_b + QTime_b + 
+    Satisfaction_AR_c + LTime_c + QTime_c + 
+    (1 + Satisfaction_AR_c + LTime + QTime | ID),
+  data = dat
+)
+```
+
+```{r}
+#| label: fit-1
+#| message: false
+fit_lmer <- function(y) {
+  out <- .lmer(
+    str_glue("{y} ~ 1 + LTime_b + QTime_b + {y}_AR_c + LTime_c + QTime_c + ({y}_AR_c + LTime_c + QTime_c | ID)"),
+    data = dat
+  )
+  out
+}
+
+# Bayesian models for plots
+fit_brms <- function(y) {
+  out <- brm(
+    str_glue("{y} ~ 1 + LTime_b + QTime_b + {y}_AR_c + LTime_c + QTime_c + ({y}_AR_c + LTime_c + QTime_c | ID)"),
+    data = dat,
+    iter = 3000,
+    cores = 8, threads = 2, backend = "cmdstanr",
+    control = list(adapt_delta = .99),
+    file = str_glue("tmp/brm-fit-1-{y}")
+  )
+  out
+}
+fits1 <- tibble(
+  y = c("Satisfaction", "Lonely", "Alonely", "Stress", "Autonomy")
+) %>% 
+  mutate(
+    fit_lmer = map(y, fit_lmer),
+    fit_brms = map(y, fit_brms)
+  )
+```
+
+## Results
+
+The models converged fine. The key parameter estimates are shown in @tbl-rq1. Parameters with `_b` refer to the between-person coefficients, and with `_c` to the within-person components.
+
+```{r}
+#| include: true
+#| label: tbl-rq1
+#| tbl-cap: Key parameter estimates from models targeting research question 1.
+
+tab1 <- fits1 %>% 
+  mutate(p = map(fit_lmer, ~parameters(.x, effects = "fixed"))) %>% 
+  select(Outcome = y, p) %>% 
+  unnest(p)
+
+tab1 %>%
+    mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = str_glue(
+      "{Coefficient}, CI = [{CI_low}, {CI_high}], p {print_p(p, add_equals = TRUE)}"
+    ),
+  ) %>% 
+  # mutate(Outcome = if_else(Parameter == "(Intercept)", Outcome, "")) %>% 
+  select(Outcome, Parameter, Estimate) %>% 
+  k2() %>% 
+  # column_spec(1, bold = TRUE, underline = TRUE) %>% 
+  row_spec(
+    which(
+      tab1$p < .05 &
+        str_detect(tab1$Parameter, "Time")
+    ),
+    bold = TRUE
+  ) %>%
+  footnote(
+    "CIs are 95% confidence intervals."
+  )
+```
+
+```{r}
+plot_coef_time <- tab1 %>% 
+  filter(str_detect(Parameter, "Time")) %>% 
+  separate(Parameter, c("Parameter", "level")) %>% 
+  mutate(
+    level = factor(
+      level, 
+      levels = c("c", "b"), 
+      labels = c("Within-person", "Between-person")),
+    Parameter = factor(
+      Parameter, 
+      levels = c("LTime", "QTime"),
+      labels = c("Linear", "Quadratic")
+    )
+  ) %>% 
+  mutate(Outcome = fct_rev(Outcome)) %>% 
+  ggplot(aes(Coefficient, Outcome, col = Parameter, shape = p < .05)) +
+  scale_shape_manual(values = c(21, 19)) +
+  scale_color_brewer(palette = "Set1", direction = -1) +
+  scale_x_continuous(
+    breaks = extended_breaks(7)
+  ) +
+  geom_vline(xintercept = 0, lty = 2, linewidth = .2) +
+  geom_pointrangeh(
+    aes(xmin = CI_low, xmax = CI_high),
+    position = position_dodgev(.5),
+    fill = "white"
+  ) +
+  guides(shape = "none") +
+  facet_wrap("level", scales = "free_x") +
+  theme(axis.title.y = element_blank())
+```
+
+```{r}
+#| label: epred-time-calculate
+
+calculate_epred_draws <- function(x) {
+  population <- tibble(
+    LTime_c = seq(min(x$data$LTime_c), max(x$data$LTime_c), length = 101),
+    QTime_c = LTime_c ^ 2,
+    LTime_b = 0,
+    QTime_b = 0,
+    arc = 0
+  )
+  
+  names(population)[5] <- names(x$data[4])
+  
+  bind_cols(population, fitted(x, newdata = population, re_form = NA))
+  
+}
+
+calculate_epred_draws <- memoise(calculate_epred_draws, cache = cd)
+
+epreds <- fits1 %>% 
+  mutate(out = map(fit_brms, calculate_epred_draws)) %>% 
+  select(y, out) %>% 
+  unnest(out)
+```
+
+
+```{r}
+#| label: fig-Figure-2
+#| column: body-outset-right
+#| include: true
+#| cache: false
+#| fig-height: 5
+#| fig-width: 8
+#| fig-cap: Model-estimated relations between proportional time spent in solitude and each of five well-being outcomes. Lines with ribbons indicate population-level estimates with 95% CIs.
+
+plot_epreds_time <- epreds %>%   
+  ggplot(aes(LTime_c, Estimate)) +
+  scale_y_continuous(
+    "Well-being",
+    breaks = extended_breaks(),
+    expand = expansion(.1)
+  ) +
+  scale_x_continuous(
+    "Proportional time spent in solitude",
+    breaks = extended_breaks()
+  ) +
+  geom_ribbon(
+    aes(ymin = Q2.5, ymax = Q97.5), 
+    alpha = .2
+  ) +
+  geom_line() +
+  facet_wrap("y", nrow = 1)
+
+(plot_coef_time /
+  plot_epreds_time) +
+  plot_layout(heights = c(6, 4), guides = "collect") +
+  plot_annotation(tag_levels = "A")
+```
+
+## Conclusion
+
+::: {.callout-tip}
+- RQ1: We did not find statistically significant within-person quadratic associations.
+- RQ2: Nor did we find between-person quadratic associations.
+
+Instead we found linear trends: Proportional time spent in solitude predicted loneliness, aloneliness, and autonomy positively, and satisfaction and stress negatively, at the within-person level. Between-persons, time predicted aloneliness and autonomy positively, and stress negatively.
+:::
+
+# RQ 3: Motivation effects
+
+## Choiceful motivation (level-1)
+
+### Method
+
+The model of outcome *Y* (e.g. day satisfaction) for day *i* and person *j* is 
+
+$$
+\begin{align}
+\text{Y}_{ij} \sim\ &\text{Normal}(\mu_{ij}, \sigma^2_y), \\
+\mu_{ij} =\ &\beta_{0j} + \beta_{1j}\text{Y}_{[i-1]j} + \\ 
+  &\beta_{2j}\text{LTime}_{ij} + \beta_{3j}\text{QTime}_{ij} + \beta_{4j}\text{Choice}_{ij} + \\
+  & \beta_{5j}(\text{Choice}_{ij}\times\text{LTime}_{ij}) + \beta_{6j}(\text{Choice}_{ij}\times\text{QTime}_{ij}).
+\end{align}
+$$
+
+In R, we write
+
+```{r}
+#| echo: true
+#| eval: false
+lmer(
+  Satisfaction ~ 1 + Satisfaction_AR_c + 
+    (LTime_c + QTime_c) * Choice_c +
+    (1 + Satisfaction_AR_c + (LTime_c + QTime_c) * Choice_c | ID),
+  data = dat
+)
+```
+
+```{r}
+#| label: fit-2
+#| message: false
+fit_lmer <- function(y) {
+  out <- .lmer(
+    str_glue("{y} ~ 1 + {y}_AR_c + (LTime_c + QTime_c) * Choice_c + ({y}_AR_c + (LTime_c + QTime_c) * Choice_c | ID)"),
+    data = dat
+  )
+  out
+}
+
+# Bayesian models for plots
+fit_brms <- function(y) {
+  out <- brm(
+    str_glue("{y} ~ 1 + {y}_AR_c + (LTime_c + QTime_c) * Choice_c + ({y}_AR_c + (LTime_c + QTime_c) * Choice_c | ID)"),
+    data = dat,
+    iter = 3000,
+    cores = 8, threads = 2, backend = "cmdstanr",
+    control = list(adapt_delta = .99),
+    file = str_glue("tmp/brm-fit-2-{y}")
+  )
+  out
+}
+fits3 <- tibble(
+  y = c("Satisfaction", "Lonely", "Alonely", "Stress", "Autonomy")
+) %>% 
+  mutate(
+    fit_lmer = map(y, fit_lmer),
+    fit_brms = map(y, fit_brms)
+  )
+```
+
+### Results
+
+```{r}
+#| include: true
+#| label: tbl-choice
+#| tbl-cap: Key parameter estimates.
+
+tab3 <- fits3 %>% 
+  mutate(p = map(fit_lmer, ~parameters(.x, effects = "fixed"))) %>% 
+  select(Outcome = y, p) %>% 
+  unnest(p) %>% 
+  filter(str_detect(Parameter, ":") | Parameter == "Choice_c")
+
+tab3 %>%
+  mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = str_glue(
+      "{Coefficient}, CI = [{CI_low}, {CI_high}], p {print_p(p, add_equals = TRUE)}"
+    ),
+  ) %>% 
+  select(Outcome, Parameter, Estimate) %>% 
+  k2() %>% 
+  row_spec(
+    which(
+      tab3$p < .05
+    ), 
+    bold = TRUE
+  ) %>%
+  footnote(
+    "CIs are 95% confidence intervals."
+  )
+```
+
+```{r}
+plot_coef_choice <- tab3 %>% 
+  separate(Parameter, c("Parameter", "level"), sep = "_") %>% 
+  mutate(
+    Parameter = factor(
+      Parameter, 
+      levels = c("LTime", "QTime"),
+      labels = c("Linear", "Quadratic")
+    )
+  ) %>% 
+  mutate(
+    Outcome = fct_rev(Outcome)
+  ) %>% 
+  ggplot(aes(Coefficient, Outcome, col = Parameter, shape = p < .05)) +
+  scale_shape_manual(values = c(21, 19)) +
+  scale_color_brewer(
+    "Trend",
+    breaks = c("Linear", "Quadratic"),
+    palette = "Set1", direction = -1
+  ) +
+  scale_x_continuous(
+    "Interaction coefficient",
+    breaks = extended_breaks(7)
+  ) +
+  geom_vline(xintercept = 0, lty = 2, linewidth = .2) +
+  geom_pointrangeh(
+    aes(xmin = CI_low, xmax = CI_high),
+    position = position_dodgev(.5),
+    fill = "white"
+  ) +
+  guides(shape = "none") +
+  theme(axis.title.y = element_blank())
+```
+
+```{r}
+plot_posthoc_choice <- fits3 %>% 
+  mutate(
+    emm = map(
+      fit_lmer, 
+      ~emtrends(
+        ., 
+        "Choice_c", 
+        var = "LTime_c", 
+        at = list(Choice_c = c(-sd(dat$Choice_c, na.rm = TRUE), sd(dat$Choice_c, na.rm = TRUE))), 
+        lmer.df = "asymptotic"
+      ) %>% 
+        as_tibble()
+    )
+  ) %>% 
+  select(y, emm) %>% 
+  unnest(emm) %>% 
+   mutate(
+    Outcome = fct_rev(y),
+    Choice_c = factor(number(Choice_c, .01))
+  ) %>% 
+  ggplot(
+    aes(
+      x = LTime_c.trend, 
+      y = Outcome, 
+      col = Choice_c, 
+      shape = sign(asymp.LCL) == sign(asymp.UCL))
+  ) +
+  scale_shape_manual(values = c(21, 19)) +
+  scale_color_brewer(
+    "Choiceful\nmotivation",
+    palette = "Dark2", direction = -1
+  ) +
+  scale_x_continuous(
+    "Linear trend",
+    breaks = extended_breaks(7)
+  ) +
+  geom_vline(xintercept = 0, lty = 2, size = .2) +
+  geom_pointrangeh(
+    aes(xmin = asymp.LCL, xmax = asymp.UCL),
+    position = position_dodgev(.5),
+    fill = "white"
+  ) +
+  guides(shape = "none") +
+  theme(axis.title.y = element_blank())
+```
+
+```{r}
+#| label: epred-choice-calculate
+
+calculate_epred_draws <- function(x) {
+  population <- tibble(
+    LTime_c = seq(min(x$data$LTime_c), max(x$data$LTime_c), length = 101),
+    QTime_c = LTime_c ^ 2,
+    LTime_b = 0,
+    QTime_b = 0,
+    arc = 0
+  )
+  
+  population <- expand_grid(
+    population,
+    Choice_c = c(-sd(x$data$Choice_c), sd(x$data$Choice_c))
+  )
+  
+  names(population)[5] <- names(x$data[2])
+  
+  bind_cols(population, fitted(x, newdata = population, re_form = NA))
+  
+}
+
+calculate_epred_draws <- memoise(calculate_epred_draws, cache = cd)
+
+epreds <- fits3 %>% 
+  mutate(out = map(fit_brms, calculate_epred_draws)) %>% 
+  select(y, out) %>% 
+  unnest(out) %>% 
+  mutate(
+    Choice_c = factor(number(Choice_c, .01))
+  )
+```
+
+```{r}
+#| label: fig-Figure-3
+#| column: body-outset-right
+#| include: true
+#| cache: false
+#| fig-height: 5
+#| fig-width: 8
+#| fig-cap: Moderating effects of choiceful motivation on the association between time spent in solitude and well-being.
+
+plot_epred_choice <- epreds %>%   
+  ggplot(
+    aes(LTime_c, Estimate, group = Choice_c, col = Choice_c, fill = Choice_c)
+  ) +
+  scale_color_brewer(
+    "Choiceful\nmotivation",
+    palette = "Dark2",
+    aesthetics = c("color", "fill")
+  ) +
+  scale_y_continuous(
+    "Well-being",
+    breaks = c(0, 2, 4, 6),
+    expand = expansion(.1)
+  ) +
+  scale_x_continuous(
+    "Proportional time spent in solitude",
+    breaks = extended_breaks()
+  ) +
+  geom_ribbon(
+    aes(ymin = Q2.5, ymax = Q97.5), 
+    alpha = .2, col = NA
+  ) +
+  geom_line() +
+  guides(fill = "none", color = guide_legend(override.aes = list(linewidth = 1))) +
+  facet_wrap("y", nrow = 1) +
+  theme(legend.position = "none")
+
+((plot_coef_choice | plot_posthoc_choice) /
+  plot_epred_choice) +
+  plot_layout(heights = c(6,4), guides = "collect") +
+  plot_annotation(tag_levels = "A")
+```
+
+## Self-determined motivation (level-2)
+
+### Method
+
+The model of outcome *Y* (e.g. day satisfaction) for day *i* and person *j* is 
+
+$$
+\begin{align}
+\mu_{ij} = &\gamma_{00} + \beta_{0j} + \\
+  &(\gamma_{10} + \beta_{1j})\text{Y}_{[i-1]j} + \\
+  &(\gamma_{20} + \beta_{2j})\text{LTime}_{ij} + \\
+  &(\gamma_{30} + \beta_{3j})\text{QTime}_{ij} + \\
+  &(\gamma_{01})\text{sdMot}_j + \\
+  &(\gamma_{21})\text{sdMot}_j \times \text{LTime}_{ij} + \\
+  &(\gamma_{31})\text{sdMot}_j \times \text{QTime}_{ij}.\\
+\end{align}
+$$
+
+This model tests the interaction terms $\gamma_{21}$ and $\gamma_{31}$ that describe whether the linear and quadratic associations between well-being and time spent in solitude change as function of individuals' self-determined motivation for solitude.
+
+In R, we write
+
+```{r}
+#| echo: true
+#| eval: false
+lmer(
+  Satisfaction ~ 1 + Satisfaction_AR_c + 
+    (LTime_c + QTime_c) * sdMot +
+    (1 + Satisfaction_AR_c + LTime_c + QTime_c | ID),
+  data = dat
+)
+```
+
+```{r}
+#| label: fit-sdmot
+#| message: false
+fit_lmer <- function(y) {
+  out <- .lmer(
+    str_glue("{y} ~ 1 + {y}_AR_c + (LTime_c + QTime_c) * sdMot + ({y}_AR_c + LTime_c + QTime_c | ID)"),
+    data = dat
+  )
+  out
+}
+
+# Bayesian models for plots
+fit_brms <- function(y) {
+  out <- brm(
+    str_glue("{y} ~ 1 + {y}_AR_c + (LTime_c + QTime_c) * sdMot + ({y}_AR_c + LTime_c + QTime_c | ID)"),
+    data = dat,
+    iter = 3000,
+    cores = 8, threads = 2, backend = "cmdstanr",
+    control = list(adapt_delta = .99),
+    file = str_glue("tmp/brm-fit-3-{y}")
+  )
+  out
+}
+fits4 <- tibble(
+  y = c("Satisfaction", "Lonely", "Alonely", "Stress", "Autonomy")
+) %>% 
+  mutate(
+    fit_lmer = map(y, fit_lmer),
+    fit_brms = map(y, fit_brms)
+  )
+```
+
+### Results
+
+```{r}
+#| include: true
+#| label: tbl-sdmot
+#| tbl-cap: Key parameter estimates.
+
+tab4 <- fits4 %>% 
+  mutate(p = map(fit_lmer, ~parameters(.x, effects = "fixed"))) %>% 
+  select(Outcome = y, p) %>% 
+  unnest(p) %>% 
+  filter(str_detect(Parameter, ":") | Parameter == "sdMot")
+
+tab4 %>%
+  mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = str_glue(
+      "{Coefficient}, CI = [{CI_low}, {CI_high}], p {print_p(p, add_equals = TRUE)}"
+    ),
+  ) %>% 
+  select(Outcome, Parameter, Estimate) %>% 
+  k2() %>% 
+  row_spec(
+    which(
+      tab4$p < .05
+    ), 
+    bold = TRUE
+  ) %>%
+  footnote(
+    "CIs are 95% confidence intervals."
+  )
+```
+
+```{r}
+plot_coef_sdmot <- tab4 %>% 
+  separate(Parameter, c("Parameter", "level"), sep = "_") %>% 
+  mutate(
+    Parameter = factor(
+      Parameter, 
+      levels = c("LTime", "QTime"),
+      labels = c("Linear", "Quadratic")
+    )
+  ) %>% 
+  mutate(
+    Outcome = fct_rev(Outcome)
+  ) %>% 
+  ggplot(aes(Coefficient, Outcome, col = Parameter, shape = p < .05)) +
+  scale_shape_manual(values = c(21, 19)) +
+  scale_color_brewer(
+    "Trend",
+    breaks = c("Linear", "Quadratic"),
+    palette = "Set1", direction = -1
+  ) +
+  scale_x_continuous(
+    "Interaction coefficient",
+    breaks = extended_breaks(7)
+  ) +
+  geom_vline(xintercept = 0, lty = 2, size = .2) +
+  geom_pointrangeh(
+    aes(xmin = CI_low, xmax = CI_high),
+    position = position_dodgev(.5),
+    fill = "white"
+  ) +
+  guides(shape = "none") +
+  theme(axis.title.y = element_blank())
+```
+
+```{r}
+plot_posthoc_sdmot <- fits4 %>% 
+  mutate(
+    emm = map(
+      fit_lmer, 
+      ~emtrends(
+        ., 
+        "sdMot", 
+        var = "LTime_c", 
+        at = list(sdMot = c(-sd(dat$sdMot, na.rm = TRUE), sd(dat$sdMot, na.rm = TRUE))), 
+        lmer.df = "asymptotic"
+      ) %>% 
+        as_tibble()
+    )
+  ) %>% 
+  select(y, emm) %>% 
+  unnest(emm) %>% 
+   mutate(
+    Outcome = fct_rev(y),
+    sdMot = factor(number(sdMot, .01))
+  ) %>% 
+  ggplot(
+    aes(
+      x = LTime_c.trend, 
+      y = Outcome, 
+      col = sdMot, 
+      shape = sign(asymp.LCL) == sign(asymp.UCL))
+  ) +
+  scale_shape_manual(values = c(21, 19)) +
+  scale_color_brewer(
+    "Self-determined\nmotivation",
+    palette = "Dark2", direction = -1
+  ) +
+  scale_x_continuous(
+    "Linear trend",
+    breaks = extended_breaks(7)
+  ) +
+  geom_vline(xintercept = 0, lty = 2, linewidth = .2) +
+  geom_pointrangeh(
+    aes(xmin = asymp.LCL, xmax = asymp.UCL),
+    position = position_dodgev(.5),
+    fill = "white"
+  ) +
+  guides(shape = "none") +
+  theme(axis.title.y = element_blank())
+```
+
+```{r}
+#| label: epred-sdmot-calculate
+
+calculate_epred_draws <- function(x) {
+  population <- tibble(
+    LTime_c = seq(min(x$data$LTime_c), max(x$data$LTime_c), length = 101),
+    QTime_c = LTime_c ^ 2,
+    LTime_b = 0,
+    QTime_b = 0,
+    arc = 0
+  )
+  
+  population <- expand_grid(
+    population,
+    sdMot = c(-sd(dat$sdMot, na.rm = TRUE), sd(dat$sdMot, na.rm = TRUE))
+  )
+  
+  names(population)[5] <- names(x$data[2])
+  
+  bind_cols(population, fitted(x, newdata = population, re_form = NA))
+  
+}
+
+calculate_epred_draws <- memoise(calculate_epred_draws, cache = cd)
+
+epreds <- fits4 %>% 
+  mutate(out = map(fit_brms, calculate_epred_draws)) %>% 
+  select(y, out) %>% 
+  unnest(out) %>% 
+  mutate(
+    sdMot = factor(number(sdMot, .01))
+  )
+```
+
+```{r}
+#| label: fig-Figure-4
+#| column: body-outset-right
+#| include: true
+#| cache: false
+#| fig-height: 5
+#| fig-width: 8
+#| fig-cap: Moderating effects of self-determined motivation on the association between time spent in solitude and well-being.
+
+plot_epred_sdmot <- epreds %>%   
+  ggplot(
+    aes(LTime_c, Estimate, group = sdMot, col = sdMot, fill = sdMot)
+  ) +
+  scale_color_brewer(
+    "Self-determined\nmotivation",
+    palette = "Dark2",
+    aesthetics = c("color", "fill")
+  ) +
+  scale_y_continuous(
+    "Well-being",
+    breaks = c(0, 2, 4, 6),
+    expand = expansion(.1)
+  ) +
+  scale_x_continuous(
+    "Proportional time spent in solitude",
+    breaks = extended_breaks()
+  ) +
+  geom_ribbon(
+    aes(ymin = Q2.5, ymax = Q97.5), 
+    alpha = .2, col = NA
+  ) +
+  geom_line() +
+  guides(fill = "none", color = guide_legend(override.aes = list(linewidth = 1))) +
+  facet_wrap("y", nrow = 1) +
+  theme(legend.position = "none")
+
+((plot_coef_sdmot | plot_posthoc_sdmot) /
+  plot_epred_sdmot) +
+  plot_layout(heights = c(6,4), guides = "collect") +
+  plot_annotation(tag_levels = "A")
+```
+
+## Conclusion
+
+::: {.callout-tip}
+- Neither choiceful motivation or self-determined motivation affected the quadratic relations
+- Choiceful motivation moderated linear associations between solitude time and day satisfaction and loneliness
+:::
+
+```{r}
+# Write Word table
+library(flextable)
+bind_rows(
+  tab1 %>% 
+    filter(str_detect(Parameter, "Time")),
+  tab3,
+  tab4
+) %>% 
+  mutate(
+    across(c(Coefficient, SE, CI_low, CI_high), ~number(., .01)),
+    Estimate = str_glue(
+      "{Coefficient} ({CI_low}, {CI_high}),\np {print_p(p, add_equals = TRUE)}"
+    )
+  ) %>% 
+  select(Outcome, Parameter, Estimate) %>% 
+  pivot_wider(names_from = Outcome, values_from = Estimate) %>% 
+  mutate(
+    Parameter = str_replace(Parameter, "LTime", "Linear"),
+    Parameter = str_replace(Parameter, "QTime", "Quadratic"),
+  ) %>% 
+  slice(c(3:7, 9, 10, 1,2,8)) %>% 
+  add_row(.before = 1, Parameter = "Within-person") %>% 
+  add_row(.before = 9, Parameter = "Between-person") %>% 
+  mutate(
+    Parameter = str_remove_all(Parameter, "_c|_b")
+  ) %>% 
+  flextable(cwidth = 1.15) %>% 
+  save_as_docx(
+    path = "Table1.docx"
+  )
+```
+
+
+# References {.appendix}
+
+::: {#refs}
+:::
+
+# Reproducibility {.appendix}
+
+```{r}
+sessionInfo()
+```
+

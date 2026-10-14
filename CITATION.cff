@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+title: |
+  Code supplement to "Balance between solitude and socializing: everyday solitude time both benefits and harms well-being"
+version: 1.0.1
+license: CC0-1.0
+type: software
+abstract: Code supporting the manuscript.
+message: "Please cite as indicated."
+authors:
+  - family-names: Weinstein
+    given-names: Netta
+    orcid: https://orcid.org/0000-0003-2200-6617
+    affiliation: University of Reading
+  - family-names: Vuorre
+    given-names: Matti
+    orcid: https://orcid.org/0000-0001-5052-066X
+    affiliation: Tilburg University
+  - family-names: Mark
+    given-names: Adams
+    orcid: https://orcid.org/0000-0001-8626-9227
+    affiliation: University of Reading
+  - family-names: Nguyen
+    given-names: Thuy-vy
+    orcid: https://orcid.org/0000-0003-0777-4204
+    affiliation: Durham University
+identifiers:
+  - type: doi
+    value: 10.1038/s41598-023-44507-7
+keywords:
+  - psychology
